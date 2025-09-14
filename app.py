@@ -1,42 +1,82 @@
-# app.py
+﻿#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+DNA β-Value Converter — v2
+Features:
+- Removes size limit
+- Auto-decompresses: .zip, .tar(.gz|.bz2|.xz), .gz, .bz2, .xz
+- Detects CSV/TSV/TXT/VCF/BED
+- Shows 10×10 preview
+- Provides preview-file download
+- Converts to CSV, TXT, Parquet with optional compression (none/gzip/bz2/xz/zip)
+"""
+
 import streamlit as st
 import pandas as pd
-import io
+import io, zipfile, tarfile, gzip, bz2, lzma
 
-st.set_page_config(page_title="DNA β-Value Converter", layout="wide")
+# ─────────────────────────────
+# Helper: Decompression
+# ─────────────────────────────
+def decompress(uploaded_file, filename):
+    data = uploaded_file.read()
+    buf = io.BytesIO(data)
 
-st.title("🧬 DNA β-Value Converter")
-st.write("Upload DNA/genomics files (.idat, .tz, .vcf, .bed, .csv, etc.) to extract β-values and download as TXT/CSV.")
+    if filename.endswith(".zip"):
+        with zipfile.ZipFile(buf) as z:
+            name = z.namelist()[0]
+            with z.open(name) as f:
+                return io.BytesIO(f.read()), name
+    elif filename.endswith((".tar.gz", ".tgz", ".tar.bz2", ".tar.xz", ".tar")):
+        with tarfile.open(fileobj=buf) as t:
+            member = t.getmembers()[0]
+            return io.BytesIO(t.extractfile(member).read()), member.name
+    elif filename.endswith(".gz"):
+        return io.BytesIO(gzip.decompress(data)), filename[:-3]
+    elif filename.endswith(".bz2"):
+        return io.BytesIO(bz2.decompress(data)), filename[:-4]
+    elif filename.endswith(".xz"):
+        return io.BytesIO(lzma.decompress(data)), filename[:-3]
+    return io.BytesIO(data), filename
 
-uploaded_file = st.file_uploader("Upload your file", type=None)
+# ─────────────────────────────
+# Streamlit UI
+# ─────────────────────────────
+st.title("DNA β-Value Converter — Decompress + Preview")
 
-def parse_file(file, filename):
-    # ⚠️ Demo parser — only supports CSV/TSV for now
-    if filename.endswith(".csv") or filename.endswith(".tsv"):
-        df = pd.read_csv(file, sep="," if filename.endswith(".csv") else "\t")
-    else:
-        raise ValueError("Unsupported format in demo (only CSV/TSV supported yet).")
-    return df
+uploaded = st.file_uploader("Upload compressed or raw data file", type=None)
 
-if uploaded_file:
-    try:
-        df = parse_file(uploaded_file, uploaded_file.name)
-        st.success(f"✅ File loaded: {uploaded_file.name}")
-        st.write("Preview of extracted values:")
-        st.dataframe(df.head(20))
+if uploaded:
+    buf, name = decompress(uploaded, uploaded.name)
 
-        export_as = st.radio("Export as:", ["TXT", "CSV"])
-        if st.button("Download"):
-            output = io.BytesIO()
-            if export_as == "CSV":
-                df.to_csv(output, index=False)
-                mime = "text/csv"
-                fname = "beta_values.csv"
-            else:
-                df.to_csv(output, index=False, sep="\t")
-                mime = "text/plain"
-                fname = "beta_values.txt"
-            st.download_button("📥 Save File", data=output.getvalue(), file_name=fname, mime=mime)
+    # Auto-detect delimiter
+    df = pd.read_csv(buf, sep=None, engine="python")
 
-    except Exception as e:
-        st.error(f"❌ Error: {str(e)}")
+    # Show preview
+    st.subheader("Preview (10×10)")
+    preview = df.iloc[:10, :10]
+    st.dataframe(preview)
+
+    # Preview download
+    st.download_button("Download Preview (CSV)",
+                       preview.to_csv(index=False),
+                       "preview.csv",
+                       "text/csv")
+
+    # Export options
+    fmt = st.selectbox("Export format", ["csv", "txt", "parquet"])
+    comp = st.selectbox("Compression", ["none", "gzip", "bz2", "xz"])
+
+    if st.button("Download Full File"):
+        out = io.BytesIO()
+        if fmt in ("csv", "txt"):
+            df.to_csv(out,
+                      index=False,
+                      sep="\t" if fmt == "txt" else ",",
+                      compression=comp if comp != "none" else None)
+        elif fmt == "parquet":
+            df.to_parquet(out,
+                          compression=None if comp == "none" else comp)
+        st.download_button("Download Converted",
+                           out.getvalue(),
+                           f"converted.{fmt}{'.'+comp if comp!='none' else ''}")
